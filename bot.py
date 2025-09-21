@@ -14,14 +14,14 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ.get('API_ID'))
 API_HASH = os.environ.get('API_HASH')
-SESSION_STRING = os.environ.get('SESSION_STRING')  # User session string for User API
+BOT_TOKEN = os.environ.get('BOT_TOKEN')  # Bot token ကို သုံး
 TEMP_DIR = os.environ.get('TEMP_DOWNLOAD_DIR', '/downloads')
 RCLONE_CONFIG_PATH = os.environ.get('RCLONE_CONFIG_PATH', '/config/rclone.conf')
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Use User API with session string (supports up to 2GB file size for free users)
-app = Client("archive_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+# Bot API နဲ့ ပြန်လုပ် (no session_string)
+app = Client("archive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 JOBS = {}
 
@@ -51,11 +51,9 @@ async def download_cmd(client, message):
         
         # Group files by format and count
         format_counts = defaultdict(int)
-        format_files = defaultdict(list)
         for f in files:
             fmt = f['format']
             format_counts[fmt] += 1
-            format_files[fmt].append(f)
         
         buttons = []
         for fmt, count in sorted(format_counts.items()):
@@ -63,7 +61,7 @@ async def download_cmd(client, message):
             buttons.append([InlineKeyboardButton(label, callback_data=f"pickformat|{jobid}|{fmt}")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{jobid}")])
         
-        await msg.edit("Available formats:\nChoose a format to download and upload to the channel:", reply_markup=InlineKeyboardMarkup(buttons))
+        await msg.edit("Available formats:\nChoose a format to download and upload:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         logger.exception(e)
         await msg.edit(f"Error: {e}")
@@ -81,6 +79,7 @@ async def pickformat(client, cq):
         await cq.message.edit("No remotes in rclone.conf. Upload one with /set_rclone_conf.")
         return
     buttons = [[InlineKeyboardButton(r, callback_data=f"upload|{jobid}|{format_}|{r}")] for r in remotes]
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{jobid}")])
     await cq.message.edit(f"Selected format: {format_}\nChoose destination:", reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex(r"^upload\|"))
@@ -109,12 +108,13 @@ async def upload(client, cq):
                         for chunk in r.iter_content(1024*1024):
                             if chunk:
                                 fh.write(chunk)
+                # Upload with rclone
                 await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
                 downloaded_files.append(local_path)
         
         await m.edit(f"Finished! All {format_} files uploaded to {remote}:Archive/{ident}")
         
-        # Clean up local storage
+        # Clean up local storage (Railway storage clean)
         for local_path in downloaded_files:
             try:
                 os.remove(local_path)
@@ -125,7 +125,7 @@ async def upload(client, cq):
         except:
             pass
         
-        # Clear job to ready for new tasks
+        # Clear job for new tasks
         if jobid in JOBS:
             del JOBS[jobid]
     except Exception as e:
