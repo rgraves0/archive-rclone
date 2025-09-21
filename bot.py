@@ -42,7 +42,7 @@ async def download_cmd(client, message):
         if not files:
             await msg.edit("No downloadable files found.")
             return
-        jobid = f"{message.chat.id}:{message.message_id}"
+        jobid = f"{message.chat.id}:{message.id}"
         JOBS[jobid] = {'identifier': ident, 'files': files, 'meta': meta}
         buttons = []
         for f in files[:10]:
