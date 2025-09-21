@@ -1,6 +1,9 @@
 import os
 import logging
 import asyncio
+import shutil
+import requests
+from collections import defaultdict
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from archive_scraper import parse_archive_url, fetch_metadata, list_files_from_metadata
@@ -11,13 +14,14 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ.get('API_ID'))
 API_HASH = os.environ.get('API_HASH')
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
+SESSION_STRING = os.environ.get('SESSION_STRING')  # User session string for User API
 TEMP_DIR = os.environ.get('TEMP_DOWNLOAD_DIR', '/downloads')
 RCLONE_CONFIG_PATH = os.environ.get('RCLONE_CONFIG_PATH', '/config/rclone.conf')
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-app = Client("archive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Use User API with session string (supports up to 2GB file size for free users)
+app = Client("archive_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
 JOBS = {}
 
@@ -44,18 +48,29 @@ async def download_cmd(client, message):
             return
         jobid = f"{message.chat.id}:{message.id}"
         JOBS[jobid] = {'identifier': ident, 'files': files, 'meta': meta}
+        
+        # Group files by format and count
+        format_counts = defaultdict(int)
+        format_files = defaultdict(list)
+        for f in files:
+            fmt = f['format']
+            format_counts[fmt] += 1
+            format_files[fmt].append(f)
+        
         buttons = []
-        for f in files[:10]:
-            label = f"{f['name']} ({f['format']})"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"pickfile|{jobid}|{f['name']}")])
-        await msg.edit("Choose a file to download:", reply_markup=InlineKeyboardMarkup(buttons))
+        for fmt, count in sorted(format_counts.items()):
+            label = f"{fmt} ({count} files)"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"pickformat|{jobid}|{fmt}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel|{jobid}")])
+        
+        await msg.edit("Available formats:\nChoose a format to download and upload to the channel:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         logger.exception(e)
         await msg.edit(f"Error: {e}")
 
-@app.on_callback_query(filters.regex(r"^pickfile\|"))
-async def pickfile(client, cq):
-    _, jobid, filename = cq.data.split('|', 2)
+@app.on_callback_query(filters.regex(r"^pickformat\|"))
+async def pickformat(client, cq):
+    _, jobid, format_ = cq.data.split('|', 2)
     await cq.answer()
     job = JOBS.get(jobid)
     if not job:
@@ -65,12 +80,12 @@ async def pickfile(client, cq):
     if not remotes:
         await cq.message.edit("No remotes in rclone.conf. Upload one with /set_rclone_conf.")
         return
-    buttons = [[InlineKeyboardButton(r, callback_data=f"upload|{jobid}|{filename}|{r}")] for r in remotes]
-    await cq.message.edit(f"Selected {filename}\nChoose destination:", reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = [[InlineKeyboardButton(r, callback_data=f"upload|{jobid}|{format_}|{r}")] for r in remotes]
+    await cq.message.edit(f"Selected format: {format_}\nChoose destination:", reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex(r"^upload\|"))
 async def upload(client, cq):
-    _, jobid, filename, remote = cq.data.split('|', 3)
+    _, jobid, format_, remote = cq.data.split('|', 3)
     await cq.answer()
     job = JOBS.get(jobid)
     if not job:
@@ -79,30 +94,51 @@ async def upload(client, cq):
     ident = job['identifier']
     target_dir = os.path.join(TEMP_DIR, ident)
     os.makedirs(target_dir, exist_ok=True)
-    local_path = os.path.join(target_dir, filename)
-    url = f"https://archive.org/download/{ident}/{filename}"
-    m = await cq.message.reply_text(f"Downloading {filename} ...")
+    remote_path = f"{remote}:Archive/{ident}"
+    m = await cq.message.reply_text(f"Downloading all {format_} files for {ident} ...")
     try:
-        import requests
-        with requests.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            with open(local_path, 'wb') as fh:
-                for chunk in r.iter_content(1024*1024):
-                    if chunk:
-                        fh.write(chunk)
-        await m.edit("Download complete, uploading to Archive/{ident}...")
-        remote_path = f"{remote}:Archive/{ident}"
-        os.makedirs(os.path.dirname(remote_path), exist_ok=True)  # Ensure Archive folder exists
-        out = await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
-        # Simplified output
-        await m.edit(f"Finished! File uploaded to {remote}:Archive/{ident}")
+        downloaded_files = []
+        for file_info in job['files']:
+            if file_info['format'] == format_:
+                filename = file_info['name']
+                local_path = os.path.join(target_dir, filename)
+                url = f"https://archive.org/download/{ident}/{filename}"
+                with requests.get(url, stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    with open(local_path, 'wb') as fh:
+                        for chunk in r.iter_content(1024*1024):
+                            if chunk:
+                                fh.write(chunk)
+                await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
+                downloaded_files.append(local_path)
+        
+        await m.edit(f"Finished! All {format_} files uploaded to {remote}:Archive/{ident}")
+        
+        # Clean up local storage
+        for local_path in downloaded_files:
+            try:
+                os.remove(local_path)
+            except:
+                pass
         try:
-            os.remove(local_path)
+            shutil.rmtree(target_dir, ignore_errors=True)
         except:
             pass
+        
+        # Clear job to ready for new tasks
+        if jobid in JOBS:
+            del JOBS[jobid]
     except Exception as e:
         logger.exception(e)
         await m.edit(f"Error: {e}")
+
+@app.on_callback_query(filters.regex(r"^cancel\|"))
+async def cancel(client, cq):
+    _, jobid = cq.data.split('|', 1)
+    await cq.answer("Operation cancelled.")
+    if jobid in JOBS:
+        del JOBS[jobid]
+    await cq.message.edit("Operation cancelled.")
 
 @app.on_message(filters.command("set_rclone_conf"))
 async def set_rclone_conf(client, message):
