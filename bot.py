@@ -114,6 +114,8 @@ async def on_document(client, message):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         await message.download(file_name=target)
         await message.reply_text(f"Saved rclone config to {target}")
+        await asyncio.sleep(2)  # စက္ကန့်အနည်းငယ်စောင့်ပြီး ဖျက်ရန် (Telegram ရဲ့ rate limit အတွက်)
+        await message.delete()
     else:
         await message.reply_text("Upload must be named rclone.conf")
 
