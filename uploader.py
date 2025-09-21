@@ -18,7 +18,7 @@ def rclone_list_remotes(rclone_conf_path: str) -> list:
 def rclone_copy(local_path: str, remote_and_path: str, rclone_conf_path: str, extra_args=None):
     if extra_args is None:
         extra_args = []
-    cmd = ['rclone', 'copy', '--progress', local_path, remote_and_path, '--config', rclone_conf_path]
+    cmd = ['/usr/bin/rclone', 'copy', '--progress', local_path, remote_and_path, '--config', rclone_conf_path]
     cmd += ['--transfers', '4', '--checkers', '8', '--drive-chunk-size', '32M']
     cmd += extra_args
     logger.info("Running rclone: %s", ' '.join(cmd))
