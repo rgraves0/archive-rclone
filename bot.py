@@ -14,13 +14,13 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ.get('API_ID'))
 API_HASH = os.environ.get('API_HASH')
-SESSION_STRING = os.environ.get('SESSION_STRING')
+BOT_TOKEN = os.environ.get('BOT_TOKEN')  # Bot token ကို သုံးမယ်
 TEMP_DIR = os.environ.get('TEMP_DOWNLOAD_DIR', '/downloads')
 RCLONE_CONFIG_PATH = os.environ.get('RCLONE_CONFIG_PATH', '/config/rclone.conf')
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-app = Client("archive_userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+app = Client("archive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)  # Bot mode
 
 JOBS = {}
 
@@ -112,9 +112,6 @@ async def upload(client, cq):
                                 for chunk in r.iter_content(1024*1024):
                                     if chunk:
                                         fh.write(chunk)
-                        file_size = os.path.getsize(local_path)
-                        if file_size > 2 * 1024 * 1024 * 1024:
-                            raise ValueError(f"File {filename} exceeds 2GB limit")
                         await asyncio.sleep(1)  # Respect rate limit
                         await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
                         downloaded_files.append(local_path)
