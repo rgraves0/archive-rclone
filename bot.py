@@ -65,11 +65,14 @@ async def pickfile(client, cq):
     if not remotes:
         await cq.message.edit("No remotes in rclone.conf. Upload one with /set_rclone_conf.")
         return
-    buttons = [[InlineKeyboardButton(r, callback_data=f"upload|{jobid}|{filename}|{r}")] for r in remotes]
-    await cq.message.edit(f"Selected {filename}\nChoose destination:", reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = []
+    for r in remotes:
+        buttons.append([InlineKeyboardButton(f"{r} (current path)", callback_data=f"currentpath|{jobid}|{filename}|{r}")])
+        buttons.append([InlineKeyboardButton(f"Choose custom path for {r}", callback_data=f"custompath|{jobid}|{filename}|{r}")])
+    await cq.message.edit(f"Selected {filename}\nChoose destination or customize path:", reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex(r"^upload\|"))
-async def upload(client, cq):
+@app.on_callback_query(filters.regex(r"^currentpath\|"))
+async def currentpath(client, cq):
     _, jobid, filename, remote = cq.data.split('|', 3)
     await cq.answer()
     job = JOBS.get(jobid)
@@ -92,6 +95,7 @@ async def upload(client, cq):
                         fh.write(chunk)
         await m.edit("Download complete, uploading...")
         remote_path = f"{remote}:Archive/{ident}"
+        os.makedirs(os.path.dirname(remote_path), exist_ok=True)  # Ensure Archive folder exists
         out = await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
         await m.edit(f"Upload successful!\n{out[:500]}")
         try:
@@ -102,6 +106,51 @@ async def upload(client, cq):
         logger.exception(e)
         await m.edit(f"Error: {e}")
 
+@app.on_callback_query(filters.regex(r"^custompath\|"))
+async def custompath(client, cq):
+    _, jobid, filename, remote = cq.data.split('|', 3)
+    await cq.answer("Please reply with the custom path (e.g., 'Archive/CustomFolder').")
+    JOBS[jobid]['custom_path'] = True
+    JOBS[jobid]['remote'] = remote
+    JOBS[jobid]['filename'] = filename
+
+@app.on_message(filters.text & filters.private, group=1)
+async def handle_custom_path(client, message):
+    for jobid, job in list(JOBS.items()):
+        if job.get('custom_path'):
+            custom_path = message.text.strip()
+            await message.delete()
+            ident = job['identifier']
+            target_dir = os.path.join(TEMP_DIR, ident)
+            os.makedirs(target_dir, exist_ok=True)
+            local_path = os.path.join(target_dir, job['filename'])
+            url = f"https://archive.org/download/{ident}/{job['filename']}"
+            m = await message.reply_text(f"Downloading {job['filename']} ...")
+            try:
+                import requests
+                with requests.get(url, stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    with open(local_path, 'wb') as fh:
+                        for chunk in r.iter_content(1024*1024):
+                            if chunk:
+                                fh.write(chunk)
+                await m.edit("Download complete, uploading...")
+                remote_path = f"{job['remote']}:{custom_path}/{ident}"
+                os.makedirs(os.path.dirname(remote_path), exist_ok=True)  # Ensure custom path exists
+                out = await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
+                await m.edit(f"Upload successful!\n{out[:500]}")
+                try:
+                    os.remove(local_path)
+                except:
+                    pass
+            except Exception as e:
+                logger.exception(e)
+                await m.edit(f"Error: {e}")
+            del JOBS[jobid]['custom_path']
+            del JOBS[jobid]['remote']
+            del JOBS[jobid]['filename']
+            break
+
 @app.on_message(filters.command("set_rclone_conf"))
 async def set_rclone_conf(client, message):
     await message.reply_text("Please reply with your rclone.conf file.")
@@ -111,11 +160,15 @@ async def on_document(client, message):
     doc = message.document
     if doc and 'rclone.conf' in doc.file_name.lower():
         target = RCLONE_CONFIG_PATH
-        os.makedirs(os.path.dirname(target), exist_ok=True)
+        target_dir = os.path.dirname(target) or '.'
+        os.makedirs(target_dir, exist_ok=True)
         await message.download(file_name=target)
         await message.reply_text(f"Saved rclone config to {target}")
-        await asyncio.sleep(2)  # စက္ကန့်အနည်းငယ်စောင့်ပြီး ဖျက်ရန် (Telegram ရဲ့ rate limit အတွက်)
-        await message.delete()
+        await asyncio.sleep(2)
+        try:
+            await message.delete()
+        except Exception as e:
+            logger.warning(f"Failed to delete message: {e}")
     else:
         await message.reply_text("Upload must be named rclone.conf")
 
