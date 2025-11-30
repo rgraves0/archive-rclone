@@ -73,13 +73,14 @@ async def pickformat(client, cq):
     await cq.answer()
     job = JOBS.get(jobid)
     if not job:
-        await cq.message.edit("Job not found.")
+        await cq.message.edit("Job not found.", reply_markup=None)
         return
     remotes = rclone_list_remotes(RCLONE_CONFIG_PATH)
     if not remotes:
-        await cq.message.edit("No remotes in rclone.conf. Upload one with /set_rclone_conf.")
+        await cq.message.edit("No remotes in rclone.conf. Upload one with /set_rclone_conf.", reply_markup=None)
         return
     buttons = [[InlineKeyboardButton(r, callback_data=f"upload|{jobid}|{format_}|{r}")] for r in remotes]
+    # Edit the existing message to show remotes (replaces format buttons)
     await cq.message.edit(f"Selected format: {format_}\nChoose destination:", reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex(r"^upload\|"))
@@ -88,13 +89,21 @@ async def upload(client, cq):
     await cq.answer()
     job = JOBS.get(jobid)
     if not job:
-        await cq.message.edit("Job not found.")
+        await cq.message.edit("Job not found.", reply_markup=None)
         return
     ident = job['identifier']
     target_dir = os.path.join(TEMP_DIR, ident)
     os.makedirs(target_dir, exist_ok=True)
     remote_path = f"{remote}:Archive/{ident}"
-    m = await cq.message.reply_text(f"Downloading all {format_} files for {ident} ...")
+
+    # === CHANGE: Edit the message to remove buttons immediately ===
+    # reply_markup=None removes the inline keyboard
+    await cq.message.edit(
+        f"Downloading all {format_} files for {ident} ...\n(Please wait)",
+        reply_markup=None
+    )
+    m = cq.message  # Use the same message object for updates
+
     try:
         downloaded_files = []
         total_files = sum(1 for f in job['files'] if f['format'] == format_)
@@ -104,15 +113,16 @@ async def upload(client, cq):
                 filename = file_info['name']
                 local_path = os.path.join(target_dir, filename)
                 
-                # 2025 FIX: URL Encode the filename to handle #, spaces, and other special chars correctly
-                safe_filename = quote(filename)
+                # Create subdirectories locally
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                
+                # Encode URL
+                safe_filename = quote(filename, safe='/')
                 url = f"https://archive.org/download/{ident}/{safe_filename}"
                 
                 success = False
-                for attempt in range(3):  # Retry 3 times
+                for attempt in range(3):
                     try:
-                        # Using requests in a thread to avoid blocking the async loop heavily
-                        # Note: For very large files, consider using aiohttp in the future.
                         with requests.get(url, stream=True, timeout=60) as r:
                             r.raise_for_status()
                             with open(local_path, 'wb') as fh:
@@ -120,9 +130,8 @@ async def upload(client, cq):
                                     if chunk:
                                         fh.write(chunk)
                         
-                        await asyncio.sleep(1)  # Respect rate limit
-                        
-                        # 2025 UPDATE: Use asyncio.to_thread for cleaner non-blocking execution
+                        await asyncio.sleep(1)
+                        # Upload
                         await asyncio.to_thread(rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
                         
                         downloaded_files.append(local_path)
@@ -132,30 +141,30 @@ async def upload(client, cq):
                         break
                     except Exception as e:
                         logger.error(f"Attempt {attempt+1} failed for {filename}: {e}")
-                        await asyncio.sleep(5)  # Wait before retry
+                        if os.path.exists(local_path):
+                            try:
+                                os.remove(local_path)
+                            except:
+                                pass
+                        await asyncio.sleep(5)
+                
                 if not success:
                     logger.error(f"Failed to process {filename} after 3 attempts")
         
         await m.edit(f"Finished! {downloaded_count}/{total_files} {format_} files uploaded to {remote}:Archive/{ident}")
         
-        # Clean up local storage
-        for local_path in downloaded_files:
-            try:
-                os.remove(local_path)
-            except:
-                pass
+        # Cleanup
         try:
             shutil.rmtree(target_dir, ignore_errors=True)
         except:
             pass
         
-        # Clear job to ready for new tasks
         if jobid in JOBS:
             del JOBS[jobid]
+            
     except Exception as e:
         logger.exception(e)
         await m.edit(f"Error: {e}")
-        # Clean up on error
         try:
             shutil.rmtree(target_dir, ignore_errors=True)
         except:
@@ -167,7 +176,8 @@ async def cancel(client, cq):
     await cq.answer("Operation cancelled.")
     if jobid in JOBS:
         del JOBS[jobid]
-    await cq.message.edit("Operation cancelled.")
+    # This edits the text and removes buttons (since no reply_markup is passed)
+    await cq.message.edit("Operation cancelled.", reply_markup=None)
 
 @app.on_message(filters.command("set_rclone_conf"))
 async def set_rclone_conf(client, message):
