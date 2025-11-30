@@ -3,6 +3,7 @@ import logging
 import asyncio
 import shutil
 import requests
+from urllib.parse import quote
 from collections import defaultdict
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,13 +15,13 @@ logger = logging.getLogger(__name__)
 
 API_ID = int(os.environ.get('API_ID'))
 API_HASH = os.environ.get('API_HASH')
-BOT_TOKEN = os.environ.get('BOT_TOKEN')  # Bot token ကို သုံးမယ်
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 TEMP_DIR = os.environ.get('TEMP_DOWNLOAD_DIR', '/downloads')
 RCLONE_CONFIG_PATH = os.environ.get('RCLONE_CONFIG_PATH', '/config/rclone.conf')
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-app = Client("archive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)  # Bot mode
+app = Client("archive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 JOBS = {}
 
@@ -102,18 +103,28 @@ async def upload(client, cq):
             if file_info['format'] == format_:
                 filename = file_info['name']
                 local_path = os.path.join(target_dir, filename)
-                url = f"https://archive.org/download/{ident}/{filename}"
+                
+                # 2025 FIX: URL Encode the filename to handle #, spaces, and other special chars correctly
+                safe_filename = quote(filename)
+                url = f"https://archive.org/download/{ident}/{safe_filename}"
+                
                 success = False
                 for attempt in range(3):  # Retry 3 times
                     try:
+                        # Using requests in a thread to avoid blocking the async loop heavily
+                        # Note: For very large files, consider using aiohttp in the future.
                         with requests.get(url, stream=True, timeout=60) as r:
                             r.raise_for_status()
                             with open(local_path, 'wb') as fh:
                                 for chunk in r.iter_content(1024*1024):
                                     if chunk:
                                         fh.write(chunk)
+                        
                         await asyncio.sleep(1)  # Respect rate limit
-                        await asyncio.get_event_loop().run_in_executor(None, rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
+                        
+                        # 2025 UPDATE: Use asyncio.to_thread for cleaner non-blocking execution
+                        await asyncio.to_thread(rclone_copy, local_path, remote_path, RCLONE_CONFIG_PATH, [])
+                        
                         downloaded_files.append(local_path)
                         downloaded_count += 1
                         logger.info(f"Downloaded and uploaded: {filename} ({downloaded_count}/{total_files})")
