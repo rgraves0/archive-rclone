@@ -1,37 +1,53 @@
-# Base image for your bot
+# ── Base ───────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# 1. Update and install necessary tools (curl, unzip, ffmpeg, git, ca-certificates)
-# We need curl and unzip for the rclone installation.
+# ── System dependencies ────────────────────────────────────────────────────────
 RUN apt-get update && \
-    apt-get install -y curl unzip ca-certificates git ffmpeg && \
-    # Cleanup to reduce image size
+    apt-get install -y --no-install-recommends \
+        curl unzip ca-certificates git ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 2. Install the LATEST Rclone (Ensures Linkbox support is included)
-# This uses the current AMD64 link, which will give a version >= 1.73 (with Linkbox support).
-RUN curl -fsSLo /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
+# ── Install latest rclone (AMD64) ─────────────────────────────────────────────
+RUN curl -fsSLo /tmp/rclone.zip \
+        https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
     unzip /tmp/rclone.zip -d /tmp && \
     cp /tmp/rclone-*-linux-amd64/rclone /usr/bin/rclone && \
-    chown root:root /usr/bin/rclone && chmod 755 /usr/bin/rclone && \
-    rm -rf /tmp/rclone* # 3. Copy files and install Python dependencies
+    chown root:root /usr/bin/rclone && \
+    chmod 755 /usr/bin/rclone && \
+    rm -rf /tmp/rclone*
+
+# ── Non-root user ──────────────────────────────────────────────────────────────
+# Running as root inside a container is a security anti-pattern.
+# All bot files and runtime dirs are owned by this user.
+RUN groupadd -r botuser && useradd -r -g botuser -m botuser
+
+# ── App files ──────────────────────────────────────────────────────────────────
 WORKDIR /app
-COPY . /app
+COPY --chown=botuser:botuser . /app
 
-# === Permission Fix: Add this line ===
-# This solves the "permission denied" error for the entrypoint script.
 RUN chmod +x /app/entrypoint.sh
-# =====================================
 
+# ── Python dependencies ────────────────────────────────────────────────────────
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Define volumes and environment variables
+# ── Runtime directories ────────────────────────────────────────────────────────
+RUN mkdir -p /config /downloads && \
+    chown -R botuser:botuser /config /downloads && \
+    chmod 700 /config && \
+    chmod 750 /downloads
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
 VOLUME ["/config", "/downloads"]
 
-ENV RCLONE_CONFIG_PATH=/config/rclone.conf
-ENV TEMP_DOWNLOAD_DIR=/downloads
-ENV PYTHONUNBUFFERED=1
+# ── Environment defaults ───────────────────────────────────────────────────────
+ENV RCLONE_CONFIG_PATH=/config/rclone.conf \
+    TEMP_DOWNLOAD_DIR=/downloads \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# 5. Entrypoint
+# Switch to non-root user before running
+USER botuser
+
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
 ENTRYPOINT ["/app/entrypoint.sh"]
